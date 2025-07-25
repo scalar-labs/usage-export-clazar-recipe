@@ -1,4 +1,4 @@
-# S3 to Clazar Usage Metering Script
+# S3 to Clazar Usage Export Script
 
 This script automatically pulls usage metering data from S3 and uploads aggregated data to Clazar on an hourly basis. It maintains state to ensure no data gaps or duplicates, making it suitable for production deployment.
 
