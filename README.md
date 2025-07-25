@@ -48,12 +48,7 @@ Your AWS credentials need the following S3 permissions:
 
 ### 1. Install Dependencies
 ```bash
-# Using pip
-pip install boto3 requests
-
-# Or using requirements.txt
-echo "boto3>=1.26.0" > requirements.txt
-echo "requests>=2.28.0" >> requirements.txt
+# Install from requirements.txt
 pip install -r requirements.txt
 ```
 
@@ -72,9 +67,6 @@ export AWS_ACCESS_KEY_ID="your-access-key"
 export AWS_SECRET_ACCESS_KEY="your-secret-key"
 export AWS_DEFAULT_REGION="us-east-1"
 ```
-
-**Option C: IAM Role (recommended for EC2/ECS)**
-- Attach an IAM role with the required S3 permissions to your compute instance
 
 ## Configuration
 
@@ -97,7 +89,7 @@ export MAX_HOURS_PER_RUN="24"
 
 ### Configuration File Method (Alternative)
 
-Create a configuration file `/opt/metering-processor/config.env`:
+Create a configuration file `config.env` in your project directory:
 
 ```bash
 # config.env
@@ -106,13 +98,13 @@ SERVICE_NAME=Postgres
 ENVIRONMENT_TYPE=PROD
 PLAN_ID=pt-HJSv20iWX0
 CLAZAR_API_URL=https://api.clazar.io/metering/
-STATE_FILE_PATH=/opt/metering-processor/metering_state.json
+STATE_FILE_PATH=./metering_state.json
 MAX_HOURS_PER_RUN=24
 ```
 
 Then load it before running:
 ```bash
-source /opt/metering-processor/config.env
+source config.env
 python3 metering_processor.py
 ```
 
@@ -121,8 +113,7 @@ python3 metering_processor.py
 ### Manual Execution
 
 ```bash
-# Test run
-cd /opt/metering-processor
+# Test run (from project directory)
 python3 metering_processor.py
 ```
 
@@ -141,5 +132,5 @@ Example output:
 2025-07-24 16:30:02,345 - INFO - Aggregated 150 records into 12 entries
 2025-07-24 16:30:02,678 - INFO - Sending 12 metering records to Clazar
 2025-07-24 16:30:03,901 - INFO - Successfully sent data to Clazar
-2025-07-24 16:30:03,902 - INFO - Saved state to /opt/metering-processor/metering_state.json
+2025-07-24 16:30:03,902 - INFO - Saved state to ./metering_state.json
 ```
