@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 # Add the parent directory to the Python path so we can import metering_processor
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,10 +37,12 @@ def demo_dry_run():
     
     # Mock S3 operations to return sample data
     sample_usage_data = [
-        {"externalPayerId": "customer-123", "dimension": "compute-hours", "value": 10},
-        {"externalPayerId": "customer-123", "dimension": "compute-hours", "value": 5},
-        {"externalPayerId": "customer-456", "dimension": "storage-gb", "value": 100},
-        {"externalPayerId": "customer-123", "dimension": "storage-gb", "value": 50},
+        {"externalPayerId": "customer-123", "dimension": "cpu_core_hours", "value": 10},
+        {"externalPayerId": "customer-123", "dimension": "cpu_core_hours", "value": 5},
+        {"externalPayerId": "customer-456", "dimension": "memory_byte_hours", "value": 100},
+        {"externalPayerId": "customer-123", "dimension": "memory_byte_hours", "value": 50},
+        {"externalPayerId": "customer-123", "dimension": "storage_allocated_byte_hours", "value": 200},
+        {"externalPayerId": "customer-123", "dimension": "storage_allocated_byte_hours", "value": 100}
     ]
     
     with patch.object(processor, 'list_subscription_files') as mock_list_files, \

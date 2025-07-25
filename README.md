@@ -80,6 +80,9 @@ export S3_BUCKET_NAME="omnistrate-usage-metering-export-demo"
 export SERVICE_NAME="Postgres"
 export ENVIRONMENT_TYPE="PROD"
 export PLAN_ID="pt-HJSv20iWX0"
+export CLAZAR_CLIENT_ID="your-clazar-client-id"
+export CLAZAR_CLIENT_SECRET="your-clazar-client-secret"
+export CLAZAR_CLOUD="aws"  # or "azure", "gcp"
 
 # Optional Configuration (with defaults)
 export CLAZAR_API_URL="https://api.clazar.io/metering/"

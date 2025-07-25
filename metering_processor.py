@@ -22,7 +22,8 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 class MeteringProcessor:
     def __init__(self, bucket_name: str, state_file_path: str = "metering_state.json", 
-                 clazar_api_url: str = "https://api.clazar.io/metering/", dry_run: bool = False):
+                 clazar_api_url: str = "https://api.clazar.io/metering/", dry_run: bool = False,
+                 access_token: str = None, cloud: str = "aws"):
         """
         Initialize the metering processor.
         
@@ -31,11 +32,15 @@ class MeteringProcessor:
             state_file_path: Path to the state file that tracks last processed hour
             clazar_api_url: Clazar API endpoint URL
             dry_run: If True, skip actual API calls and only log payloads
+            access_token: Clazar access token for authentication
+            cloud: Cloud name (e.g., 'aws', 'azure', 'gcp')
         """
         self.bucket_name = bucket_name
         self.state_file_path = Path(state_file_path)
         self.clazar_api_url = clazar_api_url
         self.dry_run = dry_run
+        self.access_token = access_token
+        self.cloud = cloud
         self.s3_client = boto3.client('s3')
         
         # Set up logging
@@ -261,7 +266,7 @@ class MeteringProcessor:
         Returns:
             Dictionary with (externalPayerId, dimension) as key and total usage as value
         """
-        aggregated_data = defaultdict(float)
+        aggregated_data = defaultdict(int)
         
         for record in usage_records:
             external_payer_id = record.get('externalPayerId')
@@ -273,7 +278,7 @@ class MeteringProcessor:
                 continue
             
             key = (external_payer_id, dimension)
-            aggregated_data[key] += float(value)
+            aggregated_data[key] += int(value)
         
         self.logger.info(f"Aggregated {len(usage_records)} records into {len(aggregated_data)} entries")
         return dict(aggregated_data)
@@ -299,7 +304,7 @@ class MeteringProcessor:
         metering_records = []
         for (external_payer_id, dimension), quantity in aggregated_data.items():
             record = {
-                "cloud": "aws",  # Assuming AWS, adjust as needed
+                "cloud": self.cloud,
                 "contract_id": external_payer_id,
                 "dimension": dimension,
                 "start_time": start_time.isoformat() + "Z",
@@ -314,6 +319,10 @@ class MeteringProcessor:
             "accept": "application/json",
             "content-type": "application/json"
         }
+        
+        # Add authorization header if access token is available
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
         
         try:
             self.logger.info(f"Sending {len(metering_records)} metering records to Clazar")
@@ -468,10 +477,13 @@ def main():
     SERVICE_NAME = os.getenv('SERVICE_NAME', 'Postgres')
     ENVIRONMENT_TYPE = os.getenv('ENVIRONMENT_TYPE', 'PROD')
     PLAN_ID = os.getenv('PLAN_ID', 'pt-HJSv20iWX0')
+    CLAZAR_CLIENT_ID = os.getenv('CLAZAR_CLIENT_ID', '')
+    CLAZAR_CLIENT_SECRET = os.getenv('CLAZAR_CLIENT_SECRET', '')
     CLAZAR_API_URL = os.getenv('CLAZAR_API_URL', 'https://api.clazar.io/metering/')
     STATE_FILE_PATH = os.getenv('STATE_FILE_PATH', 'metering_state.json')
     MAX_HOURS_PER_RUN = int(os.getenv('MAX_HOURS_PER_RUN', '24'))
     DRY_RUN = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
+    CLAZAR_CLOUD = os.getenv('CLAZAR_CLOUD', 'aws')
     
     # Validate required environment variables
     if not all([BUCKET_NAME, SERVICE_NAME, ENVIRONMENT_TYPE, PLAN_ID]):
@@ -480,8 +492,30 @@ def main():
         sys.exit(1)
     
     try:
+        # Authenticate with Clazar
+        url = "https://api.clazar.io/authenticate/"
+
+        payload = {
+            "client_id": CLAZAR_CLIENT_ID,
+            "client_secret": CLAZAR_CLIENT_SECRET
+        }
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code != 200:
+            print(f"Error authenticating with Clazar: {response.status_code} - {response.text}")
+            sys.exit(1)
+
+        access_token = response.json().get("access_token")
+        if not access_token:
+            print("Error: No access token received from Clazar")
+            sys.exit(1)
+
         # Initialize the processor
-        processor = MeteringProcessor(BUCKET_NAME, STATE_FILE_PATH, CLAZAR_API_URL, DRY_RUN)
+        processor = MeteringProcessor(BUCKET_NAME, STATE_FILE_PATH, CLAZAR_API_URL, DRY_RUN, access_token, CLAZAR_CLOUD)
         
         # Process all pending hours
         success = processor.process_pending_hours(
