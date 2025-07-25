@@ -76,18 +76,19 @@ Set these environment variables before running the script:
 
 ```bash
 # Required Configuration
-export S3_BUCKET_NAME="omnistrate-usage-metering-export-demo"
-export SERVICE_NAME="Postgres"
-export ENVIRONMENT_TYPE="PROD"
-export PLAN_ID="pt-HJSv20iWX0"
-export CLAZAR_CLIENT_ID="your-clazar-client-id"
-export CLAZAR_CLIENT_SECRET="your-clazar-client-secret"
-export CLAZAR_CLOUD="aws"  # or "azure", "gcp"
+export S3_BUCKET_NAME="omnistrate-usage-metering-export-demo" # This should match your S3 bucket name
+export SERVICE_NAME="Postgres" # This should match the service name in your S3 paths
+export ENVIRONMENT_TYPE="PROD" # This should match the environment type in your S3 paths
+export PLAN_ID="pt-HJSv20iWX0" # This should match the plan ID in your S3 paths
+export CLAZAR_CLIENT_ID="your-clazar-client-id" # Your Clazar client ID
+export CLAZAR_CLIENT_SECRET="your-clazar-client-secret" # Your Clazar client secret
+export CLAZAR_CLOUD="aws"  # This should be the marketplace cloud (aws, azure, gcp, etc.)
 
 # Optional Configuration (with defaults)
 export CLAZAR_API_URL="https://api.clazar.io/metering/"
 export STATE_FILE_PATH="./metering_state.json"
 export MAX_HOURS_PER_RUN="24"
+export DRY_RUN="false" # Set to true for testing without sending data to Clazar
 ```
 
 ### Configuration File Method (Alternative)
@@ -100,9 +101,13 @@ S3_BUCKET_NAME=omnistrate-usage-metering-export-demo
 SERVICE_NAME=Postgres
 ENVIRONMENT_TYPE=PROD
 PLAN_ID=pt-HJSv20iWX0
+CLAZAR_CLIENT_ID=your-clazar-client-id
+CLAZAR_CLIENT_SECRET=your-clazar-client-secret
+CLAZAR_CLOUD=aws
 CLAZAR_API_URL=https://api.clazar.io/metering/
 STATE_FILE_PATH=./metering_state.json
 MAX_HOURS_PER_RUN=24
+DRY_RUN=false
 ```
 
 Then load it before running:
