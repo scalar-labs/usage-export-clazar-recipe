@@ -338,12 +338,17 @@ class MeteringProcessor:
             
             response = requests.post(self.clazar_api_url, json=payload, headers=headers)
             
-            for result in response.results:
+            if "results" not in response.json():
+                self.logger.error("Unexpected response format from Clazar API")
+                self.logger.info(f"Response: {response.text}")
+                return False
+
+            for result in response.json().get("results", []):
                 if "code" in result:
                     self.logger.error(f"Clazar API error: {result['code']} - {result.get('message', '')}")
                     return False
                 elif "status" in result and result["status"] != "success":
-                    self.logger.error(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
+                    self.logger.warning(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
                     self.logger.info(f"Response: {response.json()}")
                     return True
                 else:
