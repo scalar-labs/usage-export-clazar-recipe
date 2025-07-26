@@ -93,6 +93,8 @@ This script assumes you are charging for the following dimensions and have confi
 
 If you are using different dimensions, update the script accordingly to aggregate and send the correct data.
 
+Note the `quantity` field in the payload should always be a string of positive integers, as Clazar expects this format. So ensure your dimensions and aggregation logic align with this requirement.
+
 ## Running the Script
 
 ### Manual Execution
