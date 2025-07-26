@@ -2,15 +2,6 @@
 
 This script automatically pulls usage metering data from S3 and uploads aggregated data to Clazar on an hourly basis. It maintains state to ensure no data gaps or duplicates, making it suitable for production deployment.
 
-## Features
-
-- ✅ **Stateful Processing**: Tracks last processed hour to prevent gaps and duplicates
-- ✅ **Automatic Catch-up**: Processes missed hours if the script was down
-- ✅ **Data Aggregation**: Combines multiple records per hour per buyer-dimension
-- ✅ **Error Recovery**: Robust error handling with detailed logging
-- ✅ **Multi-Service Support**: Can handle multiple service configurations
-- ✅ **Production Ready**: Designed for reliable hourly cron execution
-
 ## Prerequisites
 
 ### System Requirements
@@ -94,30 +85,13 @@ export MAX_HOURS_PER_RUN="24"
 export DRY_RUN="false" # Set to true for testing without sending data to Clazar
 ```
 
-### Configuration File Method (Alternative)
+### Clazar Dimensions
+This script assumes you are charging for the following dimensions and have configured them in Clazar:
+- `memory_byte_hours`
+- `storage_allocated_byte_hours`
+- `cpu_core_hours`
 
-Create a configuration file `config.env` in your project directory:
-
-```bash
-# config.env
-S3_BUCKET_NAME=omnistrate-usage-metering-export-demo
-SERVICE_NAME=Postgres
-ENVIRONMENT_TYPE=PROD
-PLAN_ID=pt-HJSv20iWX0
-CLAZAR_CLIENT_ID=your-clazar-client-id
-CLAZAR_CLIENT_SECRET=your-clazar-client-secret
-CLAZAR_CLOUD=aws
-CLAZAR_API_URL=https://api.clazar.io/metering/
-STATE_FILE_PATH=./metering_state.json
-MAX_HOURS_PER_RUN=24
-DRY_RUN=false
-```
-
-Then load it before running:
-```bash
-source config.env
-python3 metering_processor.py
-```
+If you are using different dimensions, update the script accordingly to aggregate and send the correct data.
 
 ## Running the Script
 
