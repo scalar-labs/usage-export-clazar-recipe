@@ -344,17 +344,19 @@ class MeteringProcessor:
                 return False
 
             for result in response.json().get("results", []):
-                if "code" in result:
+                if "errors" in result and result["errors"]:
+                    if "already exists" in result["message"]: # Duplicate call
+                        self.logger.info(f"Duplicate call for {result.get('externalPayerId', 'unknown')}, skipping")
+                        continue
                     self.logger.error(f"Clazar API error: {result['code']} - {result.get('message', '')}")
                     return False
                 elif "status" in result and result["status"] != "success":
                     self.logger.warning(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
                     self.logger.info(f"Response: {response.json()}")
-                    return True
                 else:
                     self.logger.info("Successfully sent data to Clazar")
                     self.logger.info(f"Response: {response.json()}")
-                    return True
+            return True
                 
         except requests.RequestException as e:
             self.logger.error(f"Error sending data to Clazar: {e}")
