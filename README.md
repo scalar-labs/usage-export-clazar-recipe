@@ -110,12 +110,24 @@ The script provides detailed logging. Monitor the output for:
 
 Example output:
 ```
-2025-07-24 16:30:00,123 - INFO - Starting processing for Postgres/PROD/pt-HJSv20iWX0
-2025-07-24 16:30:00,456 - INFO - No previous processing found, starting from 2025-07-23 16:00:00
-2025-07-24 16:30:01,789 - INFO - Processing hour 1/24: 2025-07-23 16:00:00
-2025-07-24 16:30:02,012 - INFO - Found 3 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/07/23/16/
-2025-07-24 16:30:02,345 - INFO - Aggregated 150 records into 12 entries
-2025-07-24 16:30:02,678 - INFO - Sending 12 metering records to Clazar
-2025-07-24 16:30:03,901 - INFO - Successfully sent data to Clazar
-2025-07-24 16:30:03,902 - INFO - Saved state to ./metering_state.json
+2025-07-25 20:15:32,604 - INFO - Processing hour 21/24: 2025-07-23 21:00:00
+2025-07-25 20:15:32,604 - INFO - Processing hour: 2025-07-23 21:00:00 for Postgres/PROD/pt-HJSv20iWX0
+2025-07-25 20:15:32,662 - INFO - Found 1 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/07/23/21/
+2025-07-25 20:15:32,735 - INFO - Aggregated 3 records into 3 entries
+2025-07-25 20:15:32,736 - INFO - Sending 3 metering records to Clazar
+2025-07-25 20:15:33,866 - WARNING - Sent data to Clazar with warnings: status=fail. Please check if the dimensions are registered in Clazar.
+2025-07-25 20:15:33,866 - INFO - Response: {'results': [{'id': '4a4fefdc-07a9-4b84-a1ee-60c6bb690b12', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'cpu_core_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}, {'id': '82b5f8f6-b520-4747-80f2-c9e546b63c2b', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'storage_allocated_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}, {'id': 'ab5133c2-45fe-4af7-83f4-736ac5f31a9a', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'memory_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}]}
+2025-07-25 20:15:33,868 - INFO - Loaded state from metering_state.json
+2025-07-25 20:15:33,869 - INFO - Saved state to metering_state.json
+2025-07-25 20:15:33,869 - INFO - Loaded state from metering_state.json
+2025-07-25 20:15:33,869 - INFO - Processing hour 22/24: 2025-07-23 22:00:00
+2025-07-25 20:15:33,869 - INFO - Processing hour: 2025-07-23 22:00:00 for Postgres/PROD/pt-HJSv20iWX0
+2025-07-25 20:15:33,940 - INFO - Found 1 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/07/23/22/
+2025-07-25 20:15:34,011 - INFO - Aggregated 3 records into 3 entries
+2025-07-25 20:15:34,012 - INFO - Sending 3 metering records to Clazar
+2025-07-25 20:15:37,526 - WARNING - Sent data to Clazar with warnings: status=fail. Please check if the dimensions are registered in Clazar.
+2025-07-25 20:15:37,526 - INFO - Response: {'results': [{'id': '85ccbe45-e12b-4c46-aadd-a29bfb523c14', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'cpu_core_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}, {'id': '3238c1b0-2619-4235-9169-01ceeea6edeb', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'storage_allocated_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}, {'id': '1402b80d-e2c1-4bff-9e02-7cbcbc15e364', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'memory_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}]}
+2025-07-25 20:15:37,527 - INFO - Loaded state from metering_state.json
+2025-07-25 20:15:37,528 - INFO - Saved state to metering_state.json
+2025-07-25 20:15:37,529 - INFO - Loaded state from metering_state.json
 ```
