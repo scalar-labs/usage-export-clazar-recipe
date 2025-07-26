@@ -48,6 +48,9 @@ Your AWS credentials need the following S3 permissions:
 
 ### 1. Install Dependencies
 ```bash
+# Activate your virtual environment if using one
+source venv/bin/activate
+
 # Install from requirements.txt
 pip install -r requirements.txt
 ```

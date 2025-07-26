@@ -317,12 +317,13 @@ class MeteringProcessor:
         
         headers = {
             "accept": "application/json",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "Authorization": f"Bearer {self.access_token}" if self.access_token else ""
         }
         
-        # Add authorization header if access token is available
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+        if not self.access_token and not self.dry_run:
+            self.logger.error("Access token is required for sending data to Clazar")
+            return False
         
         try:
             self.logger.info(f"Sending {len(metering_records)} metering records to Clazar")
@@ -337,12 +338,18 @@ class MeteringProcessor:
             
             response = requests.post(self.clazar_api_url, json=payload, headers=headers)
             
-            if response.status_code == 200:
-                self.logger.info("Successfully sent data to Clazar")
-                return True
-            else:
-                self.logger.error(f"Clazar API error: {response.status_code} - {response.text}")
-                return False
+            for result in response.results:
+                if "code" in result:
+                    self.logger.error(f"Clazar API error: {result['code']} - {result.get('message', '')}")
+                    return False
+                elif "status" in result and result["status"] != "success":
+                    self.logger.error(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
+                    self.logger.info(f"Response: {response.json()}")
+                    return True
+                else:
+                    self.logger.info("Successfully sent data to Clazar")
+                    self.logger.info(f"Response: {response.json()}")
+                    return True
                 
         except requests.RequestException as e:
             self.logger.error(f"Error sending data to Clazar: {e}")
