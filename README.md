@@ -1,18 +1,8 @@
 # S3 to Clazar Usage Export Script
 
-This script automatically pulls usage metering data from S3 and uploads aggregated data to Clazar on an hourly basis. It maintains state to ensure no data gaps or duplicates, making it suitable for production deployment.
+This script automatically pulls usage metering data from S3 and uploads aggregated data to Clazar on a monthly basis. It maintains state in S3 to ensure no data gaps or duplicates, making it suitable for production deployment. The script tracks processed contracts per month to avoid duplicate submissions during reruns.
 
 ## Prerequisites
-
-### System Requirements
-- Python 3.7 or higher
-- AWS CLI configured or AWS credentials available
-- Network access to S3 and Clazar API
-
-### Python Dependencies
-```bash
-pip install boto3 requests
-```
 
 ### AWS Permissions
 Your AWS credentials need the following S3 permissions:
@@ -24,7 +14,8 @@ Your AWS credentials need the following S3 permissions:
             "Effect": "Allow",
             "Action": [
                 "s3:GetObject",
-                "s3:ListBucket"
+                "s3:ListBucket",
+                "s3:PutObject"
             ],
             "Resource": [
                 "arn:aws:s3:::your-bucket-name",
@@ -35,55 +26,13 @@ Your AWS credentials need the following S3 permissions:
 }
 ```
 
-## Installation
-
-### 1. Install Dependencies
-```bash
-# Activate your virtual environment if using one
-source venv/bin/activate
-
-# Install from requirements.txt
-pip install -r requirements.txt
-```
-
-### 2. Configure AWS Credentials
-
-Choose one of the following methods:
-
-**Option A: AWS CLI Configuration**
-```bash
-aws configure
-```
-
-**Option B: Environment Variables**
-```bash
-export AWS_ACCESS_KEY_ID="your-access-key"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export AWS_DEFAULT_REGION="us-east-1"
-```
+Note: `s3:PutObject` permission is required for storing the state file in S3.
 
 ## Configuration
 
 ### Required Environment Variables
 
-Set these environment variables before running the script:
-
-```bash
-# Required Configuration
-export S3_BUCKET_NAME="omnistrate-usage-metering-export-demo" # This should match your S3 bucket name
-export SERVICE_NAME="Postgres" # This should match the service name in your S3 paths
-export ENVIRONMENT_TYPE="PROD" # This should match the environment type in your S3 paths
-export PLAN_ID="pt-HJSv20iWX0" # This should match the plan ID in your S3 paths
-export CLAZAR_CLIENT_ID="your-clazar-client-id" # Your Clazar client ID
-export CLAZAR_CLIENT_SECRET="your-clazar-client-secret" # Your Clazar client secret
-export CLAZAR_CLOUD="aws"  # This should be the marketplace cloud (aws, azure, gcp, etc.)
-
-# Optional Configuration (with defaults)
-export CLAZAR_API_URL="https://api.clazar.io/metering/"
-export STATE_FILE_PATH="./metering_state.json"
-export MAX_HOURS_PER_RUN="24"
-export DRY_RUN="false" # Set to true for testing without sending data to Clazar
-```
+Set the environment variables in your `.env` file or directly in your environment.
 
 ### Clazar Dimensions
 This script assumes you are charging for the following dimensions and have configured them in Clazar:
@@ -95,41 +44,123 @@ If you are using different dimensions, update the script accordingly to aggregat
 
 Note the `quantity` field in the payload should always be a string of positive integers, as Clazar expects this format. So ensure your dimensions and aggregation logic align with this requirement.
 
+## Job Behavior
+
+### Which Months Are Processed
+
+- On each run, the job determines the "next month to process":
+  - If there is no previous processing, it starts from **two months ago** (relative to the current date), to avoid processing the current (possibly incomplete) month.
+  - If there is a last processed month, it starts from the **month after the last processed month**.
+- The job processes months sequentially, up to a maximum number of months per run (default: 12).
+- The job **never processes the current or future months**—it only processes months that are fully in the past.
+
+### How Error Contracts Are Handled
+
+- When a contract fails to process for a given month (for example, due to a Clazar API error), the contract and its error details are recorded in the state file under `error_contracts` for that service/month/contract.
+- On subsequent runs, the job checks both `success_contracts` and `error_contracts` for each contract-month. If a contract is present in either, it is skipped and **not retried**.
+- This means that error contracts from previous months are **not automatically retried**. Usage for those contracts and months will not be sent to Clazar unless you take manual action.
+
+### How to Re-run Error Contracts
+
+To re-run error contracts for a previous month:
+1. Open the state file (e.g., `metering_state.json` in S3).
+2. Locate the relevant `error_contracts` entry for the service/month/contract you want to retry.
+3. Remove the contract entry from the `error_contracts` list for that month.
+4. Save the updated state file.
+5. Re-run the metering job. The job will now attempt to process the contract again for that month.
+
 ## Running the Script
 
 ### Manual Execution
 
 ```bash
+# Set required environment variables
+
 # Test run (from project directory)
 python3 metering_processor.py
 ```
 
-### Check Logs
+### Docker Execution
+
+```bash
+# Edit .env with your actual credentials and configuration
+
+# Run the container
+docker-compose up
+```
+
+## Tracking State
+
+The state file stored in S3 tracks:
+- Last processed month and last updated timestamp per service configuration
+- List of successfully processed contracts per month per service configuration
+- List of error contracts per month per service configuration
+
+Example state file structure:
+```json
+{
+  "Postgres:PROD:pt-HJSv20iWX0": {
+    "last_processed_month": "2025-06",
+    "last_updated": "2025-07-25T20:15:37Z",
+    "success_contracts": {
+      "2025-06": [
+        "ae641bd1-edf8-4038-bfed-d2ff556c729e",
+        "bf752ce2-fee9-5149-cgfe-e3gg667d83af"
+      ]
+    },
+    "error_contracts": {
+      "2025-06": [
+        {
+          "contract_id": "ce751fd3-ghi9-6159-dhgf-f4hh778e94bg",
+          "errors": ["Some error"],
+          "code": "ERROR_001",
+          "message": "Error occurred"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Checking Logs
 The script provides detailed logging. Monitor the output for:
-- Successfully processed hours
 - Any errors or warnings
+- AWS authentication method being used
 - State updates
 
 Example output:
 ```
-2025-07-25 20:15:32,604 - INFO - Processing hour 21/24: 2025-07-23 21:00:00
-2025-07-25 20:15:32,604 - INFO - Processing hour: 2025-07-23 21:00:00 for Postgres/PROD/pt-HJSv20iWX0
-2025-07-25 20:15:32,662 - INFO - Found 1 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/07/23/21/
-2025-07-25 20:15:32,735 - INFO - Aggregated 3 records into 3 entries
-2025-07-25 20:15:32,736 - INFO - Sending 3 metering records to Clazar
-2025-07-25 20:15:37,526 - INFO - Successfully sent data to Clazar.
-2025-07-25 20:15:33,866 - INFO - Response: {'results': [{'id': '4a4fefdc-07a9-4b84-a1ee-60c6bb690b12', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'cpu_core_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}, {'id': '82b5f8f6-b520-4747-80f2-c9e546b63c2b', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'storage_allocated_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}, {'id': 'ab5133c2-45fe-4af7-83f4-736ac5f31a9a', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'memory_byte_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T21:00:00Z', 'end_time': '2025-07-23T22:00:00Z', 'custom_properties': {}}]}
-2025-07-25 20:15:33,868 - INFO - Loaded state from metering_state.json
-2025-07-25 20:15:33,869 - INFO - Saved state to metering_state.json
-2025-07-25 20:15:33,869 - INFO - Loaded state from metering_state.json
-2025-07-25 20:15:33,869 - INFO - Processing hour 22/24: 2025-07-23 22:00:00
-2025-07-25 20:15:33,869 - INFO - Processing hour: 2025-07-23 22:00:00 for Postgres/PROD/pt-HJSv20iWX0
-2025-07-25 20:15:33,940 - INFO - Found 1 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/07/23/22/
-2025-07-25 20:15:34,011 - INFO - Aggregated 3 records into 3 entries
-2025-07-25 20:15:34,012 - INFO - Sending 3 metering records to Clazar
-2025-07-25 20:15:37,526 - INFO - Successfully sent data to Clazar.
-2025-07-25 20:15:37,526 - INFO - Response: {'results': [{'id': '85ccbe45-e12b-4c46-aadd-a29bfb523c14', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'cpu_core_hours', 'quantity': '1', 'status': 'fail', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}, {'id': '3238c1b0-2619-4235-9169-01ceeea6edeb', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'storage_allocated_byte_hours', 'quantity': '1', 'status': 'success', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}, {'id': '1402b80d-e2c1-4bff-9e02-7cbcbc15e364', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'memory_byte_hours', 'quantity': '1', 'status': 'success', 'start_time': '2025-07-23T22:00:00Z', 'end_time': '2025-07-23T23:00:00Z', 'custom_properties': {}}]}
-2025-07-25 20:15:37,527 - INFO - Loaded state from metering_state.json
-2025-07-25 20:15:37,528 - INFO - Saved state to metering_state.json
-2025-07-25 20:15:37,529 - INFO - Loaded state from metering_state.json
+2025-07-25 20:15:32,604 - INFO - Using provided AWS credentials for region: us-east-1
+2025-07-25 20:15:32,604 - INFO - Processing month 1/12: 2025-06
+2025-07-25 20:15:32,604 - INFO - Processing month: 2025-06 for Postgres/PROD/pt-HJSv20iWX0
+2025-07-25 20:15:32,662 - INFO - Found 744 subscription files in omnistrate-metering/Postgres/PROD/pt-HJSv20iWX0/2025/06/
+2025-07-25 20:15:32,735 - INFO - Aggregated 2232 records into 9 entries
+2025-07-25 20:15:32,736 - INFO - Filtered from 9 to 6 unprocessed contract records
+2025-07-25 20:15:32,736 - INFO - Sending 6 metering records to Clazar for 2 contracts
+2025-07-25 20:15:37,526 - INFO - Successfully sent data to Clazar
+2025-07-25 20:15:37,526 - INFO - Response: {'results': [{'id': '4a4fefdc-07a9-4b84-a1ee-60c6bb690b12', 'cloud': 'aws', 'contract_id': 'ae641bd1-edf8-4038-bfed-d2ff556c729e', 'dimension': 'cpu_core_hours', 'quantity': '720', 'status': 'success', 'start_time': '2025-06-01T00:00:00Z', 'end_time': '2025-06-30T23:59:59Z', 'custom_properties': {}}]}
+2025-07-25 20:15:33,869 - INFO - Saved state to S3: s3://omnistrate-usage-metering-export-demo/metering_state.json
 ```
+
+## Troubleshooting
+
+### AWS Authentication Issues
+
+**Problem**: `NoCredentialsError` or `Unable to locate credentials`
+**Solutions**:
+1. Verify environment variables are set: `echo $AWS_ACCESS_KEY_ID`
+2. Check AWS CLI configuration: `aws configure list`
+3. Test with the authentication script: `python3 test_aws_auth.py`
+4. Verify IAM permissions for S3 operations
+
+**Problem**: `Access Denied` errors when accessing S3
+**Solutions**:
+1. Verify the S3 bucket name is correct
+2. Check IAM permissions include `s3:GetObject`, `s3:ListBucket`, and `s3:PutObject`
+3. Ensure the bucket exists and is in the correct AWS region
+
+**Problem**: `Invalid security token` or `Token expired`
+**Solutions**:
+1. Refresh AWS credentials if using temporary tokens
+2. Check if using IAM roles and the role is still valid
+3. Re-run `aws configure` if using AWS CLI configuration
