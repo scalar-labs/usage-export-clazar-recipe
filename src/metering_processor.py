@@ -10,8 +10,9 @@ import json
 import logging
 import os
 import sys
+import time
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import calendar
 
@@ -22,29 +23,29 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 class MeteringProcessor:
     def __init__(self, bucket_name: str, state_file_path: str = "metering_state.json", 
-                 clazar_api_url: str = "https://api.clazar.io/metering/", dry_run: bool = False,
-                 access_token: str = None, cloud: str = "aws", aws_access_key_id: str = None,
-                 aws_secret_access_key: str = None, aws_region: str = None):
+                 dry_run: bool = False, access_token: str = None, cloud: str = "aws", 
+                 aws_access_key_id: str = None, aws_secret_access_key: str = None, aws_region: str = None,
+                 custom_dimensions: Dict[str, str] = None):
         """
         Initialize the metering processor.
         
         Args:
             bucket_name: S3 bucket name containing metering data
             state_file_path: Path to the state file in S3 that tracks last processed months
-            clazar_api_url: Clazar API endpoint URL
             dry_run: If True, skip actual API calls and only log payloads
             access_token: Clazar access token for authentication
             cloud: Cloud name (e.g., 'aws', 'azure', 'gcp')
             aws_access_key_id: AWS access key ID
             aws_secret_access_key: AWS secret access key
             aws_region: AWS region
+            custom_dimensions: Dict mapping custom dimension names to their formulas
         """
         self.bucket_name = bucket_name
         self.state_file_path = state_file_path
-        self.clazar_api_url = clazar_api_url
         self.dry_run = dry_run
         self.access_token = access_token
         self.cloud = cloud
+        self.custom_dimensions = custom_dimensions or {}
         
         # Configure AWS credentials and create S3 client
         s3_kwargs = {}
@@ -207,7 +208,8 @@ class MeteringProcessor:
 
     def mark_contract_month_error(self, service_name: str, environment_type: str, 
                                  plan_id: str, contract_id: str, year: int, month: int,
-                                 errors: List[str], code: str = None, message: str = None):
+                                 errors: List[str], code: str = None, message: str = None,
+                                 payload: Dict = None, retry_count: int = 0):
         """
         Mark a specific contract for a month as having errors.
         
@@ -221,6 +223,8 @@ class MeteringProcessor:
             errors: List of error messages
             code: Error code
             message: Error message
+            payload: The payload that failed to be sent
+            retry_count: Number of retries attempted
         """
         state = self.load_state()
         service_key = self.get_service_key(service_name, environment_type, plan_id)
@@ -249,21 +253,96 @@ class MeteringProcessor:
                 existing_error['code'] = code
             if message:
                 existing_error['message'] = message
+            if payload:
+                existing_error['payload'] = payload
+            existing_error['retry_count'] = retry_count
+            existing_error['last_retry_time'] = datetime.now(timezone.utc).isoformat() + 'Z'
         else:
             # Create new error entry
             error_entry = {
                 "contract_id": contract_id,
                 "errors": errors,
+                "retry_count": retry_count,
+                "last_retry_time": datetime.now(timezone.utc).isoformat() + 'Z'
             }
             if code:
                 error_entry["code"] = code
             if message:
                 error_entry["message"] = message
+            if payload:
+                error_entry["payload"] = payload
             
             state[service_key]['error_contracts'][month_key].append(error_entry)
         
         state[service_key]['last_updated'] = datetime.now(timezone.utc).isoformat() + 'Z'
         self.save_state(state)
+
+    def get_error_contracts_for_retry(self, service_name: str, environment_type: str, 
+                                     plan_id: str, year: int, month: int, max_retries: int = 5) -> List[Dict]:
+        """
+        Get error contracts that can be retried for a specific month.
+        
+        Args:
+            service_name: Name of the service
+            environment_type: Environment type
+            plan_id: Plan ID
+            year: Year
+            month: Month
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            List of error contract entries that can be retried
+        """
+        state = self.load_state()
+        service_key = self.get_service_key(service_name, environment_type, plan_id)
+        month_key = self.get_month_key(year, month)
+        
+        if (service_key not in state or 
+            'error_contracts' not in state[service_key] or 
+            month_key not in state[service_key]['error_contracts']):
+            return []
+        
+        retry_contracts = []
+        for error_entry in state[service_key]['error_contracts'][month_key]:
+            retry_count = error_entry.get('retry_count', 0)
+            if retry_count < max_retries:
+                retry_contracts.append(error_entry)
+        
+        return retry_contracts
+
+    def remove_error_contract(self, service_name: str, environment_type: str, 
+                             plan_id: str, contract_id: str, year: int, month: int):
+        """
+        Remove a contract from error contracts (when it succeeds on retry).
+        
+        Args:
+            service_name: Name of the service
+            environment_type: Environment type
+            plan_id: Plan ID
+            contract_id: Contract ID
+            year: Year
+            month: Month
+        """
+        state = self.load_state()
+        service_key = self.get_service_key(service_name, environment_type, plan_id)
+        month_key = self.get_month_key(year, month)
+        
+        if (service_key in state and 
+            'error_contracts' in state[service_key] and 
+            month_key in state[service_key]['error_contracts']):
+            
+            # Remove the error entry for this contract
+            state[service_key]['error_contracts'][month_key] = [
+                entry for entry in state[service_key]['error_contracts'][month_key]
+                if entry.get('contract_id') != contract_id
+            ]
+            
+            # Clean up empty month entry
+            if not state[service_key]['error_contracts'][month_key]:
+                del state[service_key]['error_contracts'][month_key]
+            
+            state[service_key]['last_updated'] = datetime.now(timezone.utc).isoformat() + 'Z'
+            self.save_state(state)
 
     def get_last_processed_month(self, service_name: str, environment_type: str, 
                                 plan_id: str) -> Optional[Tuple[int, int]]:
@@ -320,10 +399,34 @@ class MeteringProcessor:
 
         self.save_state(state)
 
-    def get_next_month_to_process(self, service_name: str, environment_type: str, 
-                                 plan_id: str) -> Optional[Tuple[int, int]]:
+    def load_usage_data_state(self) -> Dict:
         """
-        Get the next month that needs to be processed.
+        Load the usage data state from the S3 state file.
+
+        Returns:
+            Dictionary containing the state information
+        """
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key="omnistrate-metering/last_success_export.json")
+            content = response['Body'].read().decode('utf-8')
+            state = json.loads(content)
+            self.logger.info(f"Loaded state from S3: s3://{self.bucket_name}/omnistrate-metering/last_success_export.json")
+            return state
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                self.logger.error("omnistrate-metering/last_success_export.json file not found in S3")
+                return {}
+            else:
+                self.logger.error(f"Error loading omnistrate-metering/last_success_export.json file from S3: {e}")
+                return {}
+        except (json.JSONDecodeError, IOError) as e:
+            self.logger.error(f"Error parsing omnistrate-metering/last_success_export.json file: {e}")
+            return {}
+
+    def get_latest_month_with_complete_usage_data(self, service_name: str, environment_type: str, 
+                                plan_id: str) -> Optional[Tuple[int, int]]:
+        """
+        Get the latest month for which complete usage data is available.
         
         Args:
             service_name: Name of the service
@@ -331,30 +434,85 @@ class MeteringProcessor:
             plan_id: Plan ID
             
         Returns:
+            Tuple of (year, month) for last processed month, or None if never processed
+        """
+        state = self.load_usage_data_state()
+    
+        if not state:
+            return None
+
+        service_key = self.get_service_key(service_name, environment_type, plan_id)
+        
+        if service_key not in state:
+            return None
+        
+        try:
+            last_processed_str = state[service_key].get('last_processed_to')
+            if not last_processed_str:
+                return None
+
+            # Parse the YYYY-MM-DDTHH:MM:SSZ format
+            last_processed_to = datetime.strptime(last_processed_str, '%Y-%m-%dT%H:%M:%SZ')
+            
+            # Get last day of the month
+            year = last_processed_to.year
+            month = last_processed_to.month
+            last_day_of_the_month = calendar.monthrange(year, month)[1]
+
+            # Get the last complete month
+            if last_processed_to.date().day != last_day_of_the_month or last_processed_to.minute != 59:
+                # If not at the end of the month, adjust to the last complete month
+                if last_processed_to.month == 1:
+                    year = last_processed_to.year - 1
+                    month = 12
+                else:
+                    year = last_processed_to.year
+                    month = last_processed_to.month - 1
+            else:
+                year = last_processed_to.year
+                month = last_processed_to.month
+            
+            return (year, month)
+
+        except (KeyError, ValueError) as e:
+            self.logger.error(f"Error parsing last processed month for {service_key}: {e}")
+            return None
+
+    def get_next_month_to_process(self, service_name: str, environment_type: str, 
+                                 plan_id: str, default_start_month: Optional[Tuple[int, int]] = None) -> Optional[Tuple[int, int]]:
+        """
+        Get the next month that needs to be processed.
+        
+        Args:
+            service_name: Name of the service
+            environment_type: Environment type
+            plan_id: Plan ID
+            default_start_month: Optional default start month (as tuple of (year, month))
+            
+        Returns:
             Tuple of (year, month) for next month to process, or None if caught up
         """
         last_processed = self.get_last_processed_month(service_name, environment_type, plan_id)
-        current_date = datetime.now(timezone.utc)
-        current_month = (current_date.year, current_date.month)
+        latest_month_with_complete_usage_data = self.get_latest_month_with_complete_usage_data(service_name, environment_type, plan_id)
+        if latest_month_with_complete_usage_data is None:
+            self.logger.error(f"Failed to retrieve latest month with complete usage data")
+            return None
         
         if last_processed is None:
-            # If never processed, start from 2 months ago to avoid processing incomplete current month
-            target_date = current_date.replace(day=1) - timedelta(days=32)  # Go back at least one month
-            target_date = target_date.replace(day=1)  # First day of that month
-            start_month = (target_date.year, target_date.month)
-            self.logger.info(f"No previous processing found, starting from {start_month[0]}-{start_month[1]:02d}")
-            return start_month
-        
-        # Calculate next month
-        year, month = last_processed
-        if month == 12:
-            next_year, next_month = year + 1, 1
+            # If never processed, start from the default start month
+            next_year, next_month = default_start_month
         else:
-            next_year, next_month = year, month + 1
+            # Calculate next month
+            year, month = last_processed
+            if month == 12:
+                next_year, next_month = year + 1, 1
+            else:
+                next_year, next_month = year, month + 1
         
-        # Don't process the current month as it might be incomplete
-        if (next_year, next_month) >= current_month:
-            self.logger.info("Caught up with current month, no processing needed")
+        # Check if next month is beyond the latest month with complete usage data
+        latest_year, latest_month = latest_month_with_complete_usage_data
+        if (next_year > latest_year) or (next_year == latest_year and next_month > latest_month):
+            self.logger.info(f"Already caught up to the latest month with complete usage data: {latest_year}-{latest_month:02d}")
             return None
         
         return (next_year, next_month)
@@ -462,6 +620,68 @@ class MeteringProcessor:
         self.logger.info(f"Aggregated {len(usage_records)} records into {len(aggregated_data)} entries")
         return dict(aggregated_data)
 
+    def transform_dimensions(self, aggregated_data: Dict[Tuple[str, str], float]) -> Dict[Tuple[str, str], float]:
+        """
+        Transform dimensions according to custom dimension formulas.
+        
+        Args:
+            aggregated_data: Original aggregated data with (contract_id, dimension) as key
+            
+        Returns:
+            Transformed aggregated data with custom dimensions
+        """
+        if not self.custom_dimensions:
+            # No custom dimensions defined, return original data
+            return aggregated_data
+        
+        # Group data by contract for easier processing
+        contract_data = defaultdict(dict)
+        for (contract_id, dimension), value in aggregated_data.items():
+            contract_data[contract_id][dimension] = value
+        
+        transformed_data = {}
+        
+        for contract_id, dimensions in contract_data.items():
+            # Apply custom dimension transformations
+            for custom_name, formula in self.custom_dimensions.items():
+                try:
+                    # Create a safe evaluation context with available dimensions
+                    eval_context = {
+                        'memory_byte_hours': dimensions.get('memory_byte_hours', 0),
+                        'storage_allocated_byte_hours': dimensions.get('storage_allocated_byte_hours', 0),
+                        'cpu_core_hours': dimensions.get('cpu_core_hours', 0),
+                        # Add mathematical functions for safety
+                        '__builtins__': {
+                            'abs': abs, 'min': min, 'max': max, 'round': round,
+                            'int': int, 'float': float
+                        }
+                    }
+                    
+                    # Evaluate the formula
+                    result = eval(formula, eval_context)
+                    if not isinstance(result, (int, float)) or result < 0:
+                        raise ValueError(f"Formula must evaluate to a non-negative number, got: {result}")
+                    
+                    transformed_data[(contract_id, custom_name)] = float(result)
+                    self.logger.debug(f"Contract {contract_id}: {custom_name} = {result} (formula: {formula})")
+                    
+                except Exception as e:
+                    error_msg = f"Error evaluating formula for dimension '{custom_name}' and contract '{contract_id}': {e}"
+                    self.logger.error(error_msg)
+                    # Don't add this dimension to the result, effectively skipping this contract's data
+                    # This ensures we don't send invalid/incomplete usage data to Clazar
+                    if contract_id in [key[0] for key in transformed_data.keys()]:
+                        # Remove any previous dimensions for this contract if we had an error
+                        transformed_data = {k: v for k, v in transformed_data.items() if k[0] != contract_id}
+                    break  # Skip this contract entirely if any dimension fails
+        
+        if transformed_data:
+            self.logger.info(f"Transformed {len(aggregated_data)} original dimension entries into {len(transformed_data)} custom dimension entries")
+        else:
+            self.logger.warning("No valid custom dimension data was generated. Check your dimension formulas.")
+        
+        return transformed_data
+
     def filter_success_contracts(self, aggregated_data: Dict[Tuple[str, str], float],
                                   service_name: str, environment_type: str, plan_id: str,
                                   year: int, month: int) -> Dict[Tuple[str, str], float]:
@@ -493,9 +713,11 @@ class MeteringProcessor:
 
     def send_to_clazar(self, aggregated_data: Dict[Tuple[str, str], float], 
                       start_time: datetime, end_time: datetime,
-                      service_name: str, environment_type: str, plan_id: str) -> bool:
+                      service_name: str, environment_type: str, plan_id: str,
+                      max_retries: int = 5) -> bool:
         """
         Send aggregated usage data to Clazar and track processed contracts.
+        Includes retry logic with exponential backoff for failed contracts.
         
         Args:
             aggregated_data: Aggregated usage data
@@ -504,6 +726,7 @@ class MeteringProcessor:
             service_name: Name of the service
             environment_type: Environment type
             plan_id: Plan ID
+            max_retries: Maximum retry attempts for failed contracts
             
         Returns:
             True if successful, False otherwise
@@ -512,9 +735,8 @@ class MeteringProcessor:
             self.logger.info("No data to send to Clazar")
             return True
         
-        # Prepare the payload
-        metering_records = []
-        contract_ids = set()
+        # Prepare the payload grouped by contract
+        contract_records = defaultdict(list)
         
         for (external_payer_id, dimension), quantity in aggregated_data.items():
             record = {
@@ -523,12 +745,9 @@ class MeteringProcessor:
                 "dimension": dimension,
                 "start_time": start_time.isoformat() + "Z",
                 "end_time": end_time.isoformat() + "Z",
-                "quantity": str(quantity)
+                "quantity": str(int(quantity))  # Ensure it's a string of positive integer
             }
-            metering_records.append(record)
-            contract_ids.add(external_payer_id)
-        
-        payload = {"request": metering_records}
+            contract_records[external_payer_id].append(record)
         
         headers = {
             "accept": "application/json",
@@ -540,81 +759,277 @@ class MeteringProcessor:
             self.logger.error("Access token is required for sending data to Clazar")
             return False
         
-        try:
-            self.logger.info(f"Sending {len(metering_records)} metering records to Clazar for {len(contract_ids)} contracts")
+        year, month = start_time.year, start_time.month
+        all_success = True
+        
+        # Process each contract separately for better error handling and retry logic
+        for contract_id, records in contract_records.items():
+            payload = {"request": records}
+            success = False
             
-            if self.dry_run:
-                self.logger.info("DRY RUN MODE: Would send the following payload to Clazar:")
-                self.logger.info(f"URL: {self.clazar_api_url}")
-                self.logger.info(f"Payload: {json.dumps(payload, indent=2)}")
-                self.logger.info("DRY RUN MODE: Skipping actual API call")
-                
-                # In dry run, mark all contracts as processed
-                year, month = start_time.year, start_time.month
-                for contract_id in contract_ids:
-                    self.mark_contract_month_processed(service_name, environment_type, plan_id, 
-                                                     contract_id, year, month)
-                return True
-            
-            response = requests.post(self.clazar_api_url, json=payload, headers=headers)
-            
-            if "results" not in response.json():
-                self.logger.error("Unexpected response format from Clazar API")
-                self.logger.info(f"Response: {response.text}")
-                return False
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        # Exponential backoff: 2^attempt seconds
+                        wait_time = 2 ** attempt
+                        self.logger.info(f"Retrying contract {contract_id} (attempt {attempt + 1}/{max_retries + 1}) after {wait_time}s delay")
+                        time.sleep(wait_time)
+                    
+                    self.logger.info(f"Sending {len(records)} metering records to Clazar for contract {contract_id}")
+                    
+                    if self.dry_run:
+                        self.logger.info("DRY RUN MODE: Would send the following payload to Clazar:")
+                        self.logger.info(f"URL: https://api.clazar.io/metering/")
+                        self.logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+                        self.logger.info("DRY RUN MODE: Skipping actual API call")
+                        
+                        # In dry run, mark all contracts as processed
+                        self.mark_contract_month_processed(service_name, environment_type, plan_id, 
+                                                         contract_id, year, month)
+                        success = True
+                        break
+                    
+                    response = requests.post("https://api.clazar.io/metering/", json=payload, headers=headers, timeout=30)
+                    
+                    if response.status_code != 200:
+                        raise requests.RequestException(f"HTTP {response.status_code}: {response.text}")
+                    
+                    response_data = response.json()
+                    if "results" not in response_data:
+                        raise ValueError("Unexpected response format from Clazar API")
 
-            # Track successful submissions and errors per contract
-            successful_contracts = set()
-            error_contracts = {}
-            year, month = start_time.year, start_time.month
-            
-            for result in response.json().get("results", []):
-                contract_id = result.get("contract_id")
-                
-                if "errors" in result and result["errors"]:
-                    # Record the error
-                    error_msg = result.get('message', 'Unknown error')
-                    error_code = result.get('code', 'API_ERROR')
-                    errors = result["errors"] if isinstance(result["errors"], list) else [str(result["errors"])]
+                    # Check for errors in the response
+                    has_errors = False
+                    for result in response_data.get("results", []):
+                        if "errors" in result and result["errors"]:
+                            has_errors = True
+                            break
+                        elif "status" in result and result["status"] != "success":
+                            # Log warning but don't treat as error
+                            self.logger.warning(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
                     
-                    self.logger.error(f"Clazar API error for contract {contract_id}: {error_code} - {error_msg}")
-                    self.logger.error(f"Errors: {errors}")
-                    
-                    if contract_id:
-                        self.mark_contract_month_error(service_name, environment_type, plan_id, 
-                                                     contract_id, year, month, errors, error_code, error_msg)
-                    
-                    # Continue processing other contracts instead of returning False immediately
-                    continue
-                    
-                elif "status" in result and result["status"] != "success":
-                    self.logger.warning(f"Sent data to Clazar with warnings: status={result['status']}. Please check if the dimensions are registered in Clazar.")
-                    self.logger.info(f"Response: {response.json()}")
-                    # Still mark as successful if we got a response
-                    if contract_id:
-                        successful_contracts.add(contract_id)
-                else:
-                    self.logger.info("Successfully sent data to Clazar")
-                    self.logger.info(f"Response: {response.json()}")
-                    if contract_id:
-                        successful_contracts.add(contract_id)
-            
-            # Mark successfully processed contracts
-            for contract_id in successful_contracts:
-                self.mark_contract_month_processed(service_name, environment_type, plan_id, 
+                    if has_errors:
+                        # Extract error details
+                        errors = []
+                        error_code = "API_ERROR"
+                        error_message = "Unknown error"
+                        
+                        for result in response_data.get("results", []):
+                            if "errors" in result and result["errors"]:
+                                if isinstance(result["errors"], list):
+                                    errors.extend(result["errors"])
+                                else:
+                                    errors.append(str(result["errors"]))
+                                
+                                error_code = result.get('code', 'API_ERROR')
+                                error_message = result.get('message', 'Unknown error')
+                        
+                        if attempt == max_retries:
+                            # Final attempt failed, record as error
+                            self.logger.error(f"Final attempt failed for contract {contract_id}: {error_code} - {error_message}")
+                            self.logger.error(f"Errors: {errors}")
+                            self.mark_contract_month_error(service_name, environment_type, plan_id, 
+                                                         contract_id, year, month, errors, error_code, 
+                                                         error_message, payload, attempt)
+                            all_success = False
+                            break
+                        else:
+                            # Retry on next iteration
+                            self.logger.warning(f"Attempt {attempt + 1} failed for contract {contract_id}: {error_code} - {error_message}")
+                            continue
+                    else:
+                        # Success
+                        self.logger.info(f"Successfully sent data to Clazar for contract {contract_id}")
+                        self.logger.info(f"Response: {response_data}")
+                        
+                        # Remove from error contracts if it was previously failed
+                        self.remove_error_contract(service_name, environment_type, plan_id, 
                                                  contract_id, year, month)
-            
-            # Return True if we had any successful contracts, or if all contracts were processed (even with errors)
-            total_contracts_handled = len(successful_contracts) + len([r for r in response.json().get("results", []) if "errors" in r and r["errors"]])
-            
-            return total_contracts_handled > 0
+                        
+                        # Mark as successfully processed
+                        self.mark_contract_month_processed(service_name, environment_type, plan_id, 
+                                                         contract_id, year, month)
+                        success = True
+                        break
+                        
+                except requests.RequestException as e:
+                    if attempt == max_retries:
+                        self.logger.error(f"Final network error for contract {contract_id}: {e}")
+                        self.mark_contract_month_error(service_name, environment_type, plan_id, 
+                                                     contract_id, year, month, [str(e)], "NETWORK_ERROR", 
+                                                     str(e), payload, attempt)
+                        all_success = False
+                        break
+                    else:
+                        self.logger.warning(f"Network error on attempt {attempt + 1} for contract {contract_id}: {e}")
+                        continue
                 
-        except requests.RequestException as e:
-            self.logger.error(f"Error sending data to Clazar: {e}")
-            return False
+                except Exception as e:
+                    if attempt == max_retries:
+                        self.logger.error(f"Final unexpected error for contract {contract_id}: {e}")
+                        self.mark_contract_month_error(service_name, environment_type, plan_id, 
+                                                     contract_id, year, month, [str(e)], "UNEXPECTED_ERROR", 
+                                                     str(e), payload, attempt)
+                        all_success = False
+                        break
+                    else:
+                        self.logger.warning(f"Unexpected error on attempt {attempt + 1} for contract {contract_id}: {e}")
+                        continue
+            
+            if not success:
+                all_success = False
+        
+        return all_success
+
+    def retry_error_contracts(self, service_name: str, environment_type: str, 
+                             plan_id: str, year: int, month: int, max_retries: int = 5) -> bool:
+        """
+        Retry sending failed contracts for a specific month.
+        
+        Args:
+            service_name: Name of the service
+            environment_type: Environment type
+            plan_id: Plan ID
+            year: Year
+            month: Month
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            True if all retries were successful, False otherwise
+        """
+        error_contracts = self.get_error_contracts_for_retry(service_name, environment_type, 
+                                                           plan_id, year, month, max_retries)
+        
+        if not error_contracts:
+            self.logger.info(f"No error contracts to retry for {year}-{month:02d}")
+            return True
+        
+        self.logger.info(f"Retrying {len(error_contracts)} error contracts for {year}-{month:02d}")
+        
+        # Define the time window (month boundary)
+        start_time = datetime(year, month, 1)
+        last_day = calendar.monthrange(year, month)[1]
+        end_time = datetime(year, month, last_day, 23, 59, 59)
+        
+        all_success = True
+        
+        for error_entry in error_contracts:
+            contract_id = error_entry.get('contract_id')
+            payload = error_entry.get('payload')
+            retry_count = error_entry.get('retry_count', 0)
+            
+            if not contract_id or not payload:
+                self.logger.warning(f"Skipping error contract with missing data: {error_entry}")
+                continue
+            
+            # Retry this specific contract
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "Authorization": f"Bearer {self.access_token}" if self.access_token else ""
+            }
+            
+            success = False
+            current_retry = retry_count
+            
+            while current_retry < max_retries:
+                current_retry += 1
+                
+                try:
+                    # Exponential backoff
+                    wait_time = 2 ** current_retry
+                    self.logger.info(f"Retrying contract {contract_id} (retry {current_retry}/{max_retries}) after {wait_time}s delay")
+                    time.sleep(wait_time)
+                    
+                    if self.dry_run:
+                        self.logger.info("DRY RUN MODE: Would retry sending the following payload to Clazar:")
+                        self.logger.info(f"URL: https://api.clazar.io/metering/")
+                        self.logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+                        
+                        # In dry run, remove from error and mark as processed
+                        self.remove_error_contract(service_name, environment_type, plan_id, 
+                                                 contract_id, year, month)
+                        self.mark_contract_month_processed(service_name, environment_type, plan_id, 
+                                                         contract_id, year, month)
+                        success = True
+                        break
+
+                    response = requests.post("https://api.clazar.io/metering/", json=payload, headers=headers, timeout=30)
+
+                    if response.status_code != 200:
+                        raise requests.RequestException(f"HTTP {response.status_code}: {response.text}")
+                    
+                    response_data = response.json()
+                    if "results" not in response_data:
+                        raise ValueError("Unexpected response format from Clazar API")
+
+                    # Check for errors in the response
+                    has_errors = False
+                    for result in response_data.get("results", []):
+                        if "errors" in result and result["errors"]:
+                            has_errors = True
+                            break
+                    
+                    if has_errors:
+                        # Update retry count but continue trying
+                        errors = []
+                        error_code = "API_ERROR"
+                        error_message = "Unknown error"
+                        
+                        for result in response_data.get("results", []):
+                            if "errors" in result and result["errors"]:
+                                if isinstance(result["errors"], list):
+                                    errors.extend(result["errors"])
+                                else:
+                                    errors.append(str(result["errors"]))
+                                
+                                error_code = result.get('code', 'API_ERROR')
+                                error_message = result.get('message', 'Unknown error')
+                        
+                        self.logger.warning(f"Retry {current_retry} failed for contract {contract_id}: {error_code} - {error_message}")
+                        
+                        # Update error entry with new retry count
+                        self.mark_contract_month_error(service_name, environment_type, plan_id, 
+                                                     contract_id, year, month, errors, error_code, 
+                                                     error_message, payload, current_retry)
+                        
+                        if current_retry >= max_retries:
+                            self.logger.error(f"Max retries reached for contract {contract_id}")
+                            all_success = False
+                            break
+                        continue
+                    else:
+                        # Success - remove from error contracts and mark as processed
+                        self.logger.info(f"Successfully retried contract {contract_id} on attempt {current_retry}")
+                        self.logger.info(f"Response: {response_data}")
+                        
+                        self.remove_error_contract(service_name, environment_type, plan_id, 
+                                                 contract_id, year, month)
+                        self.mark_contract_month_processed(service_name, environment_type, plan_id, 
+                                                         contract_id, year, month)
+                        success = True
+                        break
+                        
+                except Exception as e:
+                    self.logger.warning(f"Retry {current_retry} error for contract {contract_id}: {e}")
+                    
+                    # Update error entry with new retry count
+                    self.mark_contract_month_error(service_name, environment_type, plan_id, 
+                                                 contract_id, year, month, [str(e)], "RETRY_ERROR", 
+                                                 str(e), payload, current_retry)
+                    
+                    if current_retry >= max_retries:
+                        self.logger.error(f"Max retries reached for contract {contract_id} due to error: {e}")
+                        all_success = False
+                        break
+            
+            if not success:
+                all_success = False
+        
+        return all_success
 
     def process_month(self, service_name: str, environment_type: str, 
-                     plan_id: str, year: int, month: int) -> bool:
+                     plan_id: str, year: int, month: int, max_retries: int = 5) -> bool:
         """
         Process usage data for a specific month.
         
@@ -624,11 +1039,15 @@ class MeteringProcessor:
             plan_id: Plan ID
             year: Year to process
             month: Month to process
+            max_retries: Maximum retry attempts for failed contracts
             
         Returns:
             True if successful, False otherwise
         """
         self.logger.info(f"Processing month: {year}-{month:02d} for {service_name}/{environment_type}/{plan_id}")
+        
+        # First, retry any existing error contracts
+        retry_success = self.retry_error_contracts(service_name, environment_type, plan_id, year, month, max_retries)
         
         # Get S3 prefix for the month
         prefix = self.get_monthly_s3_prefix(service_name, environment_type, plan_id, year, month)
@@ -638,7 +1057,8 @@ class MeteringProcessor:
         
         if not subscription_files:
             self.logger.info(f"No subscription files found for {year}-{month:02d}")
-            return True
+            # Return success of retry attempts if there were any
+            return retry_success
         
         # Read and aggregate all usage data
         all_usage_records = []
@@ -648,10 +1068,18 @@ class MeteringProcessor:
         
         if not all_usage_records:
             self.logger.info(f"No usage records found for {year}-{month:02d}")
-            return True
+            # Return success of retry attempts if there were any
+            return retry_success
         
         # Aggregate the data
         aggregated_data = self.aggregate_usage_data(all_usage_records)
+        
+        # Transform dimensions according to custom dimension formulas
+        if self.custom_dimensions:
+            aggregated_data = self.transform_dimensions(aggregated_data)
+            if not aggregated_data:
+                self.logger.error(f"All dimension transformations failed for {year}-{month:02d}. Skipping this month.")
+                return False
         
         # Filter out already processed contracts
         filtered_data = self.filter_success_contracts(aggregated_data, service_name, 
@@ -659,7 +1087,8 @@ class MeteringProcessor:
         
         if not filtered_data:
             self.logger.info(f"All contracts for {year}-{month:02d} have already been processed")
-            return True
+            # Return success of retry attempts if there were any
+            return retry_success
         
         # Define the time window (month boundary)
         start_time = datetime(year, month, 1)
@@ -668,55 +1097,52 @@ class MeteringProcessor:
         end_time = datetime(year, month, last_day, 23, 59, 59)
         
         # Send to Clazar
-        return self.send_to_clazar(filtered_data, start_time, end_time, 
-                                 service_name, environment_type, plan_id)
+        send_success = self.send_to_clazar(filtered_data, start_time, end_time, 
+                                         service_name, environment_type, plan_id, max_retries)
+        
+        # Return True only if both retry and send operations were successful
+        return retry_success and send_success
 
-    def process_pending_months(self, service_name: str, environment_type: str, 
-                              plan_id: str, max_months: int = 12) -> bool:
+    def process_next_month(self, service_name: str, environment_type: str, 
+                          plan_id: str, max_retries: int = 5, start_month: tuple = (2025, 1)) -> bool:
         """
-        Process all pending months for a specific service configuration.
+        Process the next pending month for a specific service configuration.
         
         Args:
             service_name: Name of the service
             environment_type: Environment type
             plan_id: Plan ID
-            max_months: Maximum number of months to process in one run
+            max_retries: Maximum retry attempts for failed contracts
+            start_month: Default start month if no previous processing history
             
         Returns:
-            True if all processing was successful, False otherwise
+            True if processing was successful, False otherwise
         """
         self.logger.info(f"Starting processing for {service_name}/{environment_type}/{plan_id}")
         
-        processed_count = 0
-        all_successful = True
+        next_month = self.get_next_month_to_process(service_name, environment_type, plan_id, 
+                                                    default_start_month=start_month)
         
-        while processed_count < max_months:
-            next_month = self.get_next_month_to_process(service_name, environment_type, plan_id)
-            
-            if next_month is None:
-                self.logger.info("No more months to process, caught up!")
-                break
-            
-            year, month = next_month
-            self.logger.info(f"Processing month {processed_count + 1}/{max_months}: {year}-{month:02d}")
-            
-            success = self.process_month(service_name, environment_type, plan_id, year, month)
-            
-            if success:
-                # Update state only if processing was successful
-                self.update_last_processed_month(service_name, environment_type, plan_id, year, month)
-                processed_count += 1
-            else:
-                self.logger.error(f"Failed to process month {year}-{month:02d}, stopping")
-                all_successful = False
-                break
+        if next_month is None:
+            self.logger.info("No more months to process, caught up!")
+            return True
         
-        self.logger.info(f"Processed {processed_count} months. Success: {all_successful}")
-        return all_successful
+        year, month = next_month
+        self.logger.info(f"Processing month: {year}-{month:02d}")
+        
+        success = self.process_month(service_name, environment_type, plan_id, year, month, max_retries)
+        
+        if success:
+            # Update state only if processing was successful
+            self.update_last_processed_month(service_name, environment_type, plan_id, year, month)
+            self.logger.info(f"Successfully processed month {year}-{month:02d}")
+        else:
+            self.logger.error(f"Failed to process month {year}-{month:02d}")
+        
+        return success
 
-
-def main():
-    """Main function to run the metering processor."""
+def main_processing():
+    """Main processing function to run the metering processor."""
     
     # AWS Configuration
     AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -727,7 +1153,6 @@ def main():
     # Clazar Configuration
     CLAZAR_CLIENT_ID = os.getenv('CLAZAR_CLIENT_ID', '')
     CLAZAR_CLIENT_SECRET = os.getenv('CLAZAR_CLIENT_SECRET', '')
-    CLAZAR_API_URL = os.getenv('CLAZAR_API_URL', 'https://api.clazar.io/metering/')
     CLAZAR_CLOUD = os.getenv('CLAZAR_CLOUD', 'aws')
 
     # Metering Processor Configuration
@@ -735,8 +1160,34 @@ def main():
     ENVIRONMENT_TYPE = os.getenv('ENVIRONMENT_TYPE', 'PROD')
     PLAN_ID = os.getenv('PLAN_ID', 'pt-HJSv20iWX0')
     STATE_FILE_PATH = os.getenv('STATE_FILE_PATH', 'metering_state.json')
-    MAX_MONTHS_PER_RUN = int(os.getenv('MAX_MONTHS_PER_RUN', '12'))
+    MAX_RETRIES = int(os.getenv('MAX_RETRIES', '5'))
+    START_MONTH = os.getenv('START_MONTH', '2025-01')
     DRY_RUN = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
+    
+    # Parse custom dimensions from environment variables
+    custom_dimensions = {}
+    for i in range(1, 4):  # Support up to 3 custom dimensions
+        name_key = f'DIMENSION{i}_NAME'
+        formula_key = f'DIMENSION{i}_FORMULA'
+        
+        dimension_name = os.getenv(name_key)
+        dimension_formula = os.getenv(formula_key)
+        
+        if dimension_name and dimension_formula:
+            custom_dimensions[dimension_name] = dimension_formula
+        elif dimension_name or dimension_formula:
+            print(f"Error: Both {name_key} and {formula_key} must be provided together")
+            sys.exit(1)
+    
+    # Validate no duplicate dimension names
+    if len(custom_dimensions) != len(set(custom_dimensions.keys())):
+        print("Error: Duplicate dimension names found in custom dimensions")
+        sys.exit(1)
+    
+    if custom_dimensions:
+        print(f"Custom dimensions configured: {list(custom_dimensions.keys())}")
+        for name, formula in custom_dimensions.items():
+            print(f"  {name}: {formula}")
     
     # Validate required environment variables
     if not all([BUCKET_NAME, SERVICE_NAME, ENVIRONMENT_TYPE, PLAN_ID]):
@@ -778,35 +1229,52 @@ def main():
         # Initialize the processor
         processor = MeteringProcessor(
             bucket_name=BUCKET_NAME, 
-            state_file_path=STATE_FILE_PATH, 
-            clazar_api_url=CLAZAR_API_URL, 
+            state_file_path=STATE_FILE_PATH,
             dry_run=DRY_RUN, 
             access_token=access_token, 
             cloud=CLAZAR_CLOUD,
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            aws_region=AWS_REGION
+            aws_region=AWS_REGION,
+            custom_dimensions=custom_dimensions
         )
         
-        # Process all pending months
-        success = processor.process_pending_months(
-            SERVICE_NAME, ENVIRONMENT_TYPE, PLAN_ID, MAX_MONTHS_PER_RUN
+        # Process next month
+        if START_MONTH:
+            try:
+                start_year, start_month = map(int, START_MONTH.split('-'))
+            except ValueError:
+                print(f"Invalid START_MONTH format: {START_MONTH}. Expected format: YYYY-MM")
+                sys.exit(1)
+        else:
+            start_year, start_month = 2025, 1  # Default start month if not set
+
+        success = processor.process_next_month(
+            SERVICE_NAME, ENVIRONMENT_TYPE, PLAN_ID, MAX_RETRIES, (start_year, start_month)
         )
         
         if success:
             print("Metering processing completed successfully")
-            sys.exit(0)
+            return True
         else:
             print("Metering processing failed")
-            sys.exit(1)
+            return False
             
     except NoCredentialsError:
         print("Error: AWS credentials not found.")
         print("Please configure AWS credentials by setting AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
-        sys.exit(1)
+        return False
     except Exception as e:
         print(f"Unexpected error: {e}")
-        sys.exit(1)
+        return False
+
+
+def main():
+    """Main function to run the metering processor."""
+    
+    success = main_processing()
+    if not success:
+        sys.exit(1)  # Exit with error code if processing failed
 
 
 if __name__ == "__main__":
