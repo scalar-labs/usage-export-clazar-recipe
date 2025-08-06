@@ -7,14 +7,31 @@ if [ -f "requirements.txt" ]; then
     pip install -r requirements.txt
 fi
 
+# Create environment file
+echo "Creating environment file..."
+printenv | grep -E '^[A-Z_][A-Z0-9_]*=' | sed 's/^\([^=]*\)=\(.*\)$/export \1="\2"/' > /app/env.sh
+
+# Create wrapper script
+cat > /app/run_job.sh << 'EOF'
+#!/bin/bash
+source /app/env.sh
+cd /app
+flock -n /tmp/metering_processor.lock python3 src/metering_processor.py
+EOF
+
+chmod +x /app/run_job.sh
+
+# Install simple crontab
+echo "*/5 * * * * /app/run_job.sh >> /var/log/cron.log 2>&1" | crontab -
+
 # Start cron service
 echo "Starting cron service..."
 service cron start
 
-# Run the script once immediately (optional) - don't exit if it fails
-echo "Running initial execution: python3 src/metering_processor.py"
-python3 "src/metering_processor.py" || echo "Initial execution failed, but cron job will continue to retry every 5 minutes..."
+# Verify setup
+echo "Installed crontab:"
+crontab -l
 
 # Keep the container running and tail the cron log
-echo "Cron job scheduled to run every 5 minutes. Tailing log file..."
+echo "Cron job scheduled. Tailing log file..."
 tail -f /var/log/cron.log
