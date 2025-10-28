@@ -5,8 +5,12 @@ x-customer-integrations:
   metrics: 
 
 x-omnistrate-service-plan:
-  name: 'clazar-exporter'
+  name: 'clazar-exporter-scalar-cp'
   tenancyType: 'OMNISTRATE_DEDICATED_TENANCY'
+  deployment:
+    hostedDeployment:
+      AwsAccountId: "374096234840"
+      AwsBootstrapRoleAccountArn: arn:aws:iam::374096234840:role/omnistrate-bootstrap-role
   
 services:
   metering-processor:
